@@ -1,5 +1,8 @@
 package com.ganesh.optimisedlocationapplication.bean
 
+/**
+ * this is final output data class for optimised location
+ */
 data class OptimisedLocationDataResult(
     val success: Boolean,
     val location: OptimisedLocationData? = null,
@@ -7,6 +10,5 @@ data class OptimisedLocationDataResult(
     val userAction: String? = null,
     val message: String? = null,
     val validationDetails: ValidationResult? = null,
-    val proximityDetails: ValidationResult? = null,
-    val circleVerification: CircleVerificationResult? = null
+    val proximityDetails: ValidationResult? = null
 )

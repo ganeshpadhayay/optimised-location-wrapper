@@ -474,7 +474,7 @@ class MainActivity : AppCompatActivity() {
         optimisedLocationManager.setRegisteredShopLocation(shopLocation)
         // Example: Set last known location if available
         // You can load this from SharedPreferences or database
-        // locationAcquisitionManager.setLastKnownLocation(lastKnownLocation)
+        // optimisedLocationManager.setLastKnownLocation(lastKnownLocation)
     }
 
     override fun onResume() {

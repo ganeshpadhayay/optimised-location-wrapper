@@ -6,12 +6,12 @@ import android.content.pm.PackageManager
 import android.location.Location
 import android.os.Looper
 import androidx.core.app.ActivityCompat
-import com.ganesh.optimisedlocationapplication.bean.CircleVerificationResult
-import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationDataResult
+import com.ganesh.optimisedlocationapplication.bean.LocationSource
 import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationConfig
 import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationData
-import com.ganesh.optimisedlocationapplication.bean.LocationSource
+import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationDataResult
 import com.ganesh.optimisedlocationapplication.bean.ValidationResult
+import com.ganesh.optimisedlocationapplication.utils.OptimisedLocationUtils
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationAvailability
 import com.google.android.gms.location.LocationCallback
@@ -20,7 +20,6 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -29,7 +28,6 @@ import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
-import com.ganesh.optimisedlocationapplication.utils.OptimisedLocationUtils
 
 /**
  * Key Features:
@@ -284,13 +282,6 @@ class OptimisedLocationManager(
                 message = proximityCheck.reason
             )
         }
-        // Perform circle verification
-        val circleVerification = performCircleVerification(location)
-        if (!circleVerification.success) {
-            // Retry with fresh location if circle verification fails
-            println("Circle verification failed, retrying with fresh location...")
-            return retryWithFreshLocation()
-        }
         // Update successful location tracking
         lastSuccessfulLocation = location.copy()
         println("Location successfully validated and verified")
@@ -299,8 +290,7 @@ class OptimisedLocationManager(
             success = true,
             location = location,
             validationDetails = validationResult,
-            proximityDetails = proximityCheck,
-            circleVerification = circleVerification
+            proximityDetails = proximityCheck
         )
     }
 
@@ -371,23 +361,6 @@ class OptimisedLocationManager(
         return ValidationResult(
             isValid = true,
             reason = context.getString(R.string.validation_within_proximity, distance.toInt())
-        )
-    }
-
-    /**
-     * Simulate circle verification API call
-     */
-    private suspend fun performCircleVerification(location: OptimisedLocationData): CircleVerificationResult = withContext(Dispatchers.IO) {
-        println("Performing circle verification...")
-        // Simulate network delay
-        delay(1000)
-        // Simulate API response (replace with actual API call)
-        val mockResponse = (0..100).random() > 20 // 80% success rate for demo
-
-        return@withContext CircleVerificationResult(
-            success = mockResponse,
-            apiResponse = if (mockResponse) "MATCH" else "MISMATCH",
-            timestamp = System.currentTimeMillis()
         )
     }
 
