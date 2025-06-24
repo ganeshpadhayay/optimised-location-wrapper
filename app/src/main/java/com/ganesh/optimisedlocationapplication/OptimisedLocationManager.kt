@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.os.Looper
 import androidx.core.app.ActivityCompat
 import com.ganesh.optimisedlocationapplication.bean.LocationSource
@@ -123,43 +125,53 @@ class OptimisedLocationManager(
     }
 
     /**
-     * Attempt GPS-only location acquisition with high accuracy
+     * Attempt GPS-only location acquisition with high accuracy using LocationManager
      */
     private suspend fun tryGPSLocation(): OptimisedLocationData? = withContext(Dispatchers.IO) {
         return@withContext try {
             withTimeout(config.gpsTimeoutMs) {
                 suspendCancellableCoroutine<OptimisedLocationData?> { continuation ->
+                    val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
                     val isResumed = AtomicBoolean(false)
-                    val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000)
-                        .setMaxUpdates(1)
-                        .setMaxUpdateDelayMillis(0)
-                        .setWaitForAccurateLocation(true)
-                        .setGranularity(Priority.PRIORITY_HIGH_ACCURACY)
-                        .build()
-                    val locationCallback = object : LocationCallback() {
-                        override fun onLocationResult(locationResult: com.google.android.gms.location.LocationResult) {
+
+                    // Check if GPS provider is enabled
+                    if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                        if (isResumed.compareAndSet(false, true)) {
+                            continuation.resume(null) {}
+                        }
+                        return@suspendCancellableCoroutine
+                    }
+
+                    val locationListener = object : LocationListener {
+                        override fun onLocationChanged(location: Location) {
                             if (isResumed.compareAndSet(false, true)) {
-                                locationResult.lastLocation?.let { location ->
-                                    val result = formatLocationObject(location, LocationSource.GPS)
-                                    continuation.resume(result) {}
-                                } ?: continuation.resume(null) {}
-                                fusedLocationClient.removeLocationUpdates(this)
+                                val result = formatLocationObject(location, LocationSource.GPS)
+                                continuation.resume(result) {}
+                                locationManager.removeUpdates(this)
                             }
                         }
 
-                        override fun onLocationAvailability(availability: LocationAvailability) {
-                            if (!availability.isLocationAvailable && isResumed.compareAndSet(false, true)) {
+                        override fun onProviderEnabled(provider: String) {}
+                        override fun onProviderDisabled(provider: String) {
+                            if (provider == LocationManager.GPS_PROVIDER && isResumed.compareAndSet(false, true)) {
                                 continuation.resume(null) {}
-                                fusedLocationClient.removeLocationUpdates(this)
+                                locationManager.removeUpdates(this)
                             }
                         }
                     }
 
                     if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                        fusedLocationClient.requestLocationUpdates(locationRequest, locationCallback, Looper.getMainLooper())
+                        // Request ONLY GPS updates
+                        locationManager.requestLocationUpdates(
+                            LocationManager.GPS_PROVIDER,
+                            1000L, // 1 second intervals
+                            0f,    // No minimum distance
+                            locationListener,
+                            Looper.getMainLooper()
+                        )
 
                         continuation.invokeOnCancellation {
-                            fusedLocationClient.removeLocationUpdates(locationCallback)
+                            locationManager.removeUpdates(locationListener)
                         }
                     } else {
                         if (isResumed.compareAndSet(false, true)) {
