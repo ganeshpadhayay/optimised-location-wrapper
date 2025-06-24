@@ -52,4 +52,6 @@
     <string name="calibrate_compass_tip">Tip: If calibration does not work, try moving to an open area away from metal objects, WiFi routers, or magnetic interference.</string>
     <string name="open_google_maps">Open Google Maps</string>
     <string name="ok">OK</string>
+    <string name="error_gps_disabled">Your GPS is disabled, please turn it on.</string>
+    <string name="gps_still_disabled_after_prompt">GPS is still disabled after user prompt</string>
 </resources>

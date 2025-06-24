@@ -2,6 +2,7 @@ package com.ganesh.optimisedlocationapplication
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,7 @@ import android.location.LocationManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
@@ -17,11 +19,16 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
-import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationDataResult
+import com.ganesh.optimisedlocationapplication.bean.LocationSource
 import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationConfig
 import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationData
-import com.ganesh.optimisedlocationapplication.bean.LocationSource
+import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationDataResult
 import com.ganesh.optimisedlocationapplication.utils.OptimisedLocationUtils
+import com.google.android.gms.common.api.ResolvableApiException
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.LocationSettingsRequest
+import com.google.android.gms.location.Priority
 import kotlinx.coroutines.launch
 
 /**
@@ -74,6 +81,11 @@ class MainActivity : AppCompatActivity() {
     private var isLocationRequestInProgress = false
     private var pendingLocationCallback: ((OptimisedLocationDataResult) -> Unit)? = null
     private var buttonGetLocation: Button? = null
+
+    companion object {
+        private const val REQUEST_CODE_ENABLE_GPS = 1001
+        private const val TAG = "MainActivity"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -281,6 +293,37 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Ask user to enable GPS if not already enabled
+     */
+    private fun askUserToEnableGPS(context: Context, onResult: (Boolean) -> Unit) {
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000).build()
+        val builder = LocationSettingsRequest.Builder()
+            .addLocationRequest(locationRequest)
+            .setAlwaysShow(true) // shows system dialog even if already satisfied
+        val settingsClient = LocationServices.getSettingsClient(context)
+        val task = settingsClient.checkLocationSettings(builder.build())
+
+        task.addOnSuccessListener {
+            // All location settings are satisfied
+            onResult(true)
+        }.addOnFailureListener { exception ->
+            if (exception is ResolvableApiException) {
+                // Location settings are not satisfied, show dialog
+                try {
+                    exception.startResolutionForResult(
+                        context as Activity, // ensure you're calling from an Activity
+                        REQUEST_CODE_ENABLE_GPS
+                    )
+                } catch (sendEx: Exception) {
+                    onResult(false)
+                }
+            } else {
+                onResult(false)
+            }
+        }
+    }
+
+    /**
      * Handle successful location acquisition result
      */
     private fun handleLocationResult(result: OptimisedLocationDataResult) {
@@ -352,6 +395,21 @@ class MainActivity : AppCompatActivity() {
 
         if (result.userAction == OptimisedLocationUtils.USER_ACTION_CALIBRATE_DEVICE) {
             OptimisedLocationUtils.showCalibrationDialog(this)
+        }
+
+        if (result.userAction == OptimisedLocationUtils.USER_ACTION_REQUEST_PERMISSIONS) {
+            requestLocationPermissions()
+        }
+
+        if (result.userAction == OptimisedLocationUtils.USER_ACTION_ENABLE_GPS) {
+            askUserToEnableGPS(this) { gpsEnabled ->
+                if (gpsEnabled) {
+                    startLocationProcess()
+                } else {
+                    Log.e(TAG, getString(R.string.gps_still_disabled_after_prompt))
+                    Toast.makeText(this, getString(R.string.gps_still_disabled_after_prompt), Toast.LENGTH_SHORT).show()
+                }
+            }
         }
 
         dialog.show()
@@ -475,6 +533,19 @@ class MainActivity : AppCompatActivity() {
         // Example: Set last known location if available
         // You can load this from SharedPreferences or database
         // optimisedLocationManager.setLastKnownLocation(lastKnownLocation)
+    }
+
+    @Deprecated("This method has been deprecated in favor of using the Activity Result API\n      which brings increased type safety via an {@link ActivityResultContract} and the prebuilt\n      contracts for common intents available in\n      {@link androidx.activity.result.contract.ActivityResultContracts}, provides hooks for\n      testing, and allow receiving results in separate, testable classes independent from your\n      activity. Use\n      {@link #registerForActivityResult(ActivityResultContract, ActivityResultCallback)}\n      with the appropriate {@link ActivityResultContract} and handling the result in the\n      {@link ActivityResultCallback#onActivityResult(Object) callback}.")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_CODE_ENABLE_GPS) {
+            if (resultCode == Activity.RESULT_OK) {
+                startLocationProcess()
+            } else {
+                Log.e(TAG, getString(R.string.gps_still_disabled_after_prompt))
+                Toast.makeText(this, getString(R.string.gps_still_disabled_after_prompt), Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     override fun onResume() {
