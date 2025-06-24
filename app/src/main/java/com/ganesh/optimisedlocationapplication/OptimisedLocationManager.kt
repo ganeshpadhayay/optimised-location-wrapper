@@ -133,6 +133,8 @@ class OptimisedLocationManager(
                     val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000)
                         .setMaxUpdates(1)
                         .setMaxUpdateDelayMillis(0)
+                        .setWaitForAccurateLocation(true)
+                        .setGranularity(Priority.PRIORITY_HIGH_ACCURACY)
                         .build()
                     val locationCallback = object : LocationCallback() {
                         override fun onLocationResult(locationResult: com.google.android.gms.location.LocationResult) {
