@@ -379,15 +379,6 @@ class OptimisedLocationManager(
     }
 
     /**
-     * Retry location acquisition with fresh location after circle verification failure
-     */
-    private suspend fun retryWithFreshLocation(): OptimisedLocationDataResult {
-        println("Retrying with fresh location acquisition...")
-        // Recursive call to get a new location
-        return acquireLocation()
-    }
-
-    /**
      * Handle location acquisition failure
      */
     private fun handleLocationFailure(error: Exception): OptimisedLocationDataResult {
