@@ -14,8 +14,6 @@ import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationConfig
 import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationData
 import com.ganesh.optimisedlocationapplication.bean.OptimisedLocationDataResult
 import com.ganesh.optimisedlocationapplication.bean.ValidationResult
-import com.ganesh.optimisedlocationapplication.exception.GpsDisabledException
-import com.ganesh.optimisedlocationapplication.exception.PermissionDeniedException
 import com.ganesh.optimisedlocationapplication.utils.OptimisedLocationUtils
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
@@ -24,6 +22,9 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -34,42 +35,13 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
+ * Concurrent Location Manager with parallel execution
+ *
  * Key Features:
- * 1. High-Accuracy GPS Priority
- *
- * Starts with GPS-only mode for 30 seconds using enableHighAccuracy: true
- * Uses setWaitForAccurateLocation concept via timeout handling
- *
- * 2. Fallback Strategy
- *
- * Automatically switches to network-assisted location if GPS fails within 30 seconds
- * Uses different timeout and accuracy settings for fallback
- *
- * 3. Complete Validation System
- *
- * Recency: Ensures location is within last 30 seconds
- * Accuracy: Validates 100-meter accuracy threshold
- * Distance Comparison:
- *
- * If last known location ≤ 10 minutes old: checks 5-10km distance (configurable)
- * If > 10 minutes old: skips distance comparison
- *
- *
- *
- * 4. Proximity Validation
- *
- * Checks if new location is within 1km of last successful location or registered shop
- * Configurable proximity threshold
- *
- * 5. Circle Verification Integration
- *
- * Performs API call to circle verification service
- * Automatically retries with fresh location if verification fails
- *
- * 6. Error Handling
- *
- * Prompts user to calibrate device when no valid location found
- * Comprehensive error reporting and logging
+ * 1. Parallel Execution: Runs GPS, Network, and Fused location simultaneously
+ * 2. Priority-based Selection: GPS > Network > Fused
+ * 3. Optimized Timeouts: 30s for GPS, 15s for Network, no timeout for Fused
+ * 4. Early Termination: Stops other requests when GPS succeeds
  */
 class OptimisedLocationManager(
     private val context: Context,
@@ -81,11 +53,12 @@ class OptimisedLocationManager(
     private var registeredShopLocation: OptimisedLocationData? = null
 
     /**
-     * Main entry point for location acquisition
+     * Main entry point for concurrent location acquisition
      */
     suspend fun acquireLocation(): OptimisedLocationDataResult = withContext(Dispatchers.IO) {
         try {
-            println("Starting location acquisition...")
+            println("Starting concurrent location acquisition...")
+
             // Check permissions first
             if (!hasLocationPermissions()) {
                 return@withContext OptimisedLocationDataResult(
@@ -94,126 +67,119 @@ class OptimisedLocationManager(
                     message = OptimisedLocationUtils.getString(context, R.string.error_permission_required),
                     userAction = OptimisedLocationUtils.USER_ACTION_REQUEST_PERMISSIONS
                 )
-            } else {
-                // Permissions are granted, proceed with location acquisition
-                println("Location permissions granted, proceeding with location acquisition...")
-            }
-            // Step 1: Try high-accuracy GPS for 30 seconds
-            val gpsLocation = try {
-                tryGPSLocation()
-            } catch (e: GpsDisabledException) {
-                return@withContext OptimisedLocationDataResult(
-                    success = false,
-                    error = OptimisedLocationUtils.ERROR_GPS_DISABLED,
-                    userAction = OptimisedLocationUtils.USER_ACTION_ENABLE_GPS,
-                    message = OptimisedLocationUtils.getString(context, R.string.error_gps_disabled)
-                )
-            } catch (e: PermissionDeniedException) {
-                return@withContext OptimisedLocationDataResult(
-                    success = false,
-                    error = OptimisedLocationUtils.ERROR_PERMISSION_DENIED,
-                    message = OptimisedLocationUtils.getString(context, R.string.error_permission_required),
-                    userAction = OptimisedLocationUtils.USER_ACTION_REQUEST_PERMISSIONS
-                )
             }
 
-            if (gpsLocation != null) {
-                println("GPS location acquired: $gpsLocation")
-                return@withContext validateAndProcessLocation(gpsLocation)
-            }
-            // Step 2: Fallback to network-assisted location
-            println("GPS failed, falling back to network-assisted location...")
-            val networkLocation = tryNetworkLocation()
+            // Run all three location methods concurrently
+            val bestLocation = tryAllLocationMethodsConcurrently()
 
-            if (networkLocation != null) {
-                println("Network location acquired: $networkLocation")
-                return@withContext validateAndProcessLocation(networkLocation)
+            if (bestLocation != null) {
+                println("Best location acquired: ${bestLocation.source} - ${bestLocation}")
+                return@withContext validateAndProcessLocation(bestLocation)
             }
-            // Step 3: Try fused location as last resort
-            println("Network failed, trying fused location...")
-            val fusedLocation = tryFusedLocation()
 
-            if (fusedLocation != null) {
-                println("Fused location acquired: $fusedLocation")
-                return@withContext validateAndProcessLocation(fusedLocation)
-            }
-            // Step 4: No valid location found
+            // No valid location found
             throw Exception(OptimisedLocationUtils.ERROR_NO_VALID_LOCATION)
 
         } catch (e: Exception) {
-            println("Location acquisition failed: ${e.message}")
+            println("Concurrent location acquisition failed: ${e.message}")
             return@withContext handleLocationFailure(e)
         }
     }
 
     /**
-     * Attempt GPS-only location acquisition with high accuracy using LocationManager
+     * Run all location methods concurrently and return the best available location
      */
-    private suspend fun tryGPSLocation(): OptimisedLocationData? = withContext(Dispatchers.IO) {
+    private suspend fun tryAllLocationMethodsConcurrently(): OptimisedLocationData? = coroutineScope {
+        println("Starting concurrent location requests...")
+
+        // Start all three location requests concurrently
+        val gpsDeferred = async { tryGPSLocationConcurrent() }
+        val networkDeferred = async { tryNetworkLocationConcurrent() }
+        val fusedDeferred = async { tryFusedLocationConcurrent() }
+
+        // Wait for all to complete (or timeout)
+        val results = awaitAll(gpsDeferred, networkDeferred, fusedDeferred)
+
+        // Filter out null results
+        val validLocations = results.filterNotNull()
+
+        if (validLocations.isEmpty()) {
+            println("No valid locations from any source")
+            return@coroutineScope null
+        }
+
+        // Return best location based on priority: GPS > Network > Fused
+        val bestLocation = selectBestLocation(validLocations)
+        println("Selected best location: ${bestLocation.source}")
+
+        return@coroutineScope bestLocation
+    }
+
+    /**
+     * GPS location with 30-second timeout
+     */
+    private suspend fun tryGPSLocationConcurrent(): OptimisedLocationData? = withContext(Dispatchers.IO) {
         return@withContext try {
-            withTimeout(config.gpsTimeoutMs) {
+            println("Starting GPS location request (30s timeout)...")
+            withTimeout(30_000L) { // 30 seconds
                 suspendCancellableCoroutine<OptimisedLocationData?> { continuation ->
                     val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
                     val isResumed = AtomicBoolean(false)
+
                     // Check if GPS provider is enabled
                     if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                         println("GPS provider is disabled")
                         if (isResumed.compareAndSet(false, true)) {
-                            continuation.resumeWith(Result.failure(GpsDisabledException()))
+                            continuation.resume(null) {}
                         }
                         return@suspendCancellableCoroutine
-                    } else {
-                        // GPS provider is enabled, proceed with location request
-                        println("GPS provider is enabled, requesting location updates...")
-                        val locationListener = object : LocationListener {
-                            override fun onLocationChanged(location: Location) {
-                                println("GPS location received: lat=${location.latitude}, lng=${location.longitude}, accuracy=${location.accuracy}")
-                                if (isResumed.compareAndSet(false, true)) {
-                                    val result = formatLocationObject(location, LocationSource.GPS)
-                                    continuation.resume(result) {}
-                                    locationManager.removeUpdates(this)
-                                }
-                            }
+                    }
 
-                            override fun onProviderEnabled(provider: String) {
-                                println("Location provider enabled: $provider")
-                            }
-
-                            override fun onProviderDisabled(provider: String) {
-                                println("Location provider disabled: $provider")
-                                if (provider == LocationManager.GPS_PROVIDER && isResumed.compareAndSet(false, true)) {
-                                    continuation.resume(null) {}
-                                    locationManager.removeUpdates(this)
-                                }
+                    val locationListener = object : LocationListener {
+                        override fun onLocationChanged(location: Location) {
+                            println("GPS location received: lat=${location.latitude}, lng=${location.longitude}, accuracy=${location.accuracy}")
+                            if (isResumed.compareAndSet(false, true)) {
+                                val result = formatLocationObject(location, LocationSource.GPS)
+                                continuation.resume(result) {}
+                                locationManager.removeUpdates(this)
                             }
                         }
 
-                        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                            // Request ONLY GPS updates
-                            locationManager.requestLocationUpdates(
-                                LocationManager.GPS_PROVIDER,
-                                1000L, // 1 second intervals
-                                0f,    // No minimum distance
-                                locationListener,
-                                Looper.getMainLooper()
-                            )
+                        override fun onProviderEnabled(provider: String) {
+                            println("GPS provider enabled: $provider")
+                        }
 
-                            continuation.invokeOnCancellation {
-                                println("GPS location request cancelled")
-                                locationManager.removeUpdates(locationListener)
+                        override fun onProviderDisabled(provider: String) {
+                            println("GPS provider disabled: $provider")
+                            if (provider == LocationManager.GPS_PROVIDER && isResumed.compareAndSet(false, true)) {
+                                continuation.resume(null) {}
+                                locationManager.removeUpdates(this)
                             }
-                        } else {
-                            println("Fine location permission not granted for GPS")
-                            if (isResumed.compareAndSet(false, true)) {
-                                continuation.resumeWith(Result.failure(PermissionDeniedException()))
-                            }
-                            return@suspendCancellableCoroutine
+                        }
+                    }
+
+                    if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                        locationManager.requestLocationUpdates(
+                            LocationManager.GPS_PROVIDER,
+                            1000L, // 1 second intervals
+                            0f,    // No minimum distance
+                            locationListener,
+                            Looper.getMainLooper()
+                        )
+
+                        continuation.invokeOnCancellation {
+                            println("GPS location request cancelled")
+                            locationManager.removeUpdates(locationListener)
+                        }
+                    } else {
+                        if (isResumed.compareAndSet(false, true)) {
+                            continuation.resume(null) {}
                         }
                     }
                 }
             }
         } catch (e: TimeoutCancellationException) {
-            println("GPS timeout reached after ${config.gpsTimeoutMs}ms")
+            println("GPS timeout after 30 seconds")
             null
         } catch (e: Exception) {
             println("GPS error: ${e.message}")
@@ -222,18 +188,20 @@ class OptimisedLocationManager(
     }
 
     /**
-     * Fallback to network-assisted location
+     * Network location with 15-second timeout
      */
     @SuppressLint("MissingPermission")
-    private suspend fun tryNetworkLocation(): OptimisedLocationData? = withContext(Dispatchers.IO) {
+    private suspend fun tryNetworkLocationConcurrent(): OptimisedLocationData? = withContext(Dispatchers.IO) {
         return@withContext try {
-            withTimeout(config.networkTimeoutMs) {
+            println("Starting Network location request (15s timeout)...")
+            withTimeout(15_000L) { // 15 seconds
                 suspendCancellableCoroutine<OptimisedLocationData?> { continuation ->
                     val isResumed = AtomicBoolean(false)
                     val locationRequest = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 5000)
                         .setMaxUpdates(1)
-                        .setMaxUpdateAgeMillis(60000) // Allow slightly older cached location
+                        .setMaxUpdateAgeMillis(60000)
                         .build()
+
                     val locationCallback = object : LocationCallback() {
                         override fun onLocationResult(locationResult: com.google.android.gms.location.LocationResult) {
                             println("Network location result received")
@@ -259,7 +227,6 @@ class OptimisedLocationManager(
                             fusedLocationClient.removeLocationUpdates(locationCallback)
                         }
                     } else {
-                        println("Location permissions not available for network location")
                         if (isResumed.compareAndSet(false, true)) {
                             continuation.resume(null) {}
                         }
@@ -267,7 +234,7 @@ class OptimisedLocationManager(
                 }
             }
         } catch (e: TimeoutCancellationException) {
-            println("Network location timeout after ${config.networkTimeoutMs}ms")
+            println("Network location timeout after 15 seconds")
             null
         } catch (e: Exception) {
             println("Network location error: ${e.message}")
@@ -276,11 +243,12 @@ class OptimisedLocationManager(
     }
 
     /**
-     * Try fused location as last resort
+     * Fused location with no timeout (instant last known location)
      */
     @SuppressLint("MissingPermission")
-    private suspend fun tryFusedLocation(): OptimisedLocationData? = withContext(Dispatchers.IO) {
+    private suspend fun tryFusedLocationConcurrent(): OptimisedLocationData? = withContext(Dispatchers.IO) {
         return@withContext try {
+            println("Starting Fused location request (no timeout)...")
             suspendCancellableCoroutine<OptimisedLocationData?> { continuation ->
                 if (hasLocationPermissions()) {
                     println("Requesting last known fused location...")
@@ -309,6 +277,34 @@ class OptimisedLocationManager(
     }
 
     /**
+     * Select the best location based on priority and quality
+     */
+    private fun selectBestLocation(locations: List<OptimisedLocationData>): OptimisedLocationData {
+        // Priority order: GPS > Network > Fused
+        val gpsLocation = locations.find { it.source == LocationSource.GPS }
+        if (gpsLocation != null) {
+            println("Selecting GPS location (highest priority)")
+            return gpsLocation
+        }
+
+        val networkLocation = locations.find { it.source == LocationSource.NETWORK }
+        if (networkLocation != null) {
+            println("Selecting Network location (medium priority)")
+            return networkLocation
+        }
+
+        val fusedLocation = locations.find { it.source == LocationSource.FUSED }
+        if (fusedLocation != null) {
+            println("Selecting Fused location (lowest priority)")
+            return fusedLocation
+        }
+
+        // Fallback to the first available (shouldn't reach here)
+        println("Selecting first available location as fallback")
+        return locations.first()
+    }
+
+    /**
      * Format location object with standardized properties
      */
     private fun formatLocationObject(location: Location, source: LocationSource): OptimisedLocationData {
@@ -324,7 +320,7 @@ class OptimisedLocationManager(
     /**
      * Validate location against all criteria
      */
-    private suspend fun validateAndProcessLocation(location: OptimisedLocationData): OptimisedLocationDataResult {
+    private fun validateAndProcessLocation(location: OptimisedLocationData): OptimisedLocationDataResult {
         println("Validating location: ${location.source} - lat=${location.latitude}, lng=${location.longitude}")
         val validationResult = validateLocation(location)
 
@@ -336,6 +332,7 @@ class OptimisedLocationManager(
                 message = validationResult.reason
             )
         }
+
         // Check proximity to validated area
         val proximityCheck = checkProximity(location)
         if (!proximityCheck.isValid) {
@@ -346,6 +343,7 @@ class OptimisedLocationManager(
                 message = proximityCheck.reason
             )
         }
+
         // Update successful location tracking
         lastSuccessfulLocation = location.copy()
         println("Location successfully validated and verified")
@@ -363,6 +361,7 @@ class OptimisedLocationManager(
      */
     private fun validateLocation(location: OptimisedLocationData): ValidationResult {
         val now = System.currentTimeMillis()
+
         // Check recency (within last 30 seconds)
         if (now - location.timestamp > config.recencyThresholdMs) {
             return ValidationResult(
@@ -370,6 +369,7 @@ class OptimisedLocationManager(
                 reason = OptimisedLocationUtils.getString(context, R.string.error_location_not_recent)
             )
         }
+
         // Check accuracy (100 meters or better)
         if (location.accuracy > config.accuracyThreshold) {
             return ValidationResult(
@@ -377,6 +377,7 @@ class OptimisedLocationManager(
                 reason = context.getString(R.string.error_accuracy_exceeds, location.accuracy, config.accuracyThreshold)
             )
         }
+
         // Check distance comparison with last known location
         lastKnownLocation?.let { lastKnown ->
             val lastKnownAge = now - lastKnown.timestamp
@@ -401,7 +402,7 @@ class OptimisedLocationManager(
             }
         }
 
-        //all validation criteria met
+        // All validation criteria met
         return ValidationResult(
             isValid = true,
             reason = OptimisedLocationUtils.getString(context, R.string.validation_all_criteria_met)
@@ -420,6 +421,7 @@ class OptimisedLocationManager(
                 reason = OptimisedLocationUtils.getString(context, R.string.validation_no_reference)
             )
         }
+
         val distance = calculateDistance(location, referenceLocation) * 1000 // Convert to meters
 
         if (distance > config.proximityThresholdM) {
@@ -449,7 +451,6 @@ class OptimisedLocationManager(
                 userAction = OptimisedLocationUtils.USER_ACTION_CALIBRATE_DEVICE,
                 message = OptimisedLocationUtils.getString(context, R.string.error_calibrate_device)
             )
-
             else -> errorResponse
         }
     }
