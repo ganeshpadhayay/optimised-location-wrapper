@@ -111,7 +111,7 @@ class MainActivity : AppCompatActivity() {
             gpsTimeoutMs = 30000,
             recencyThresholdMs = 30000,
             lastKnownLocationAgeMs = 600000,
-            proximityThresholdM = 1000.0,
+            proximityThresholdM = 15000.0,
             networkTimeoutMs = 15000
         )
 

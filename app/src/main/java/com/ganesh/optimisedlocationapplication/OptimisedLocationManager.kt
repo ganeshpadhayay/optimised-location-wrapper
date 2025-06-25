@@ -1,6 +1,7 @@
 package com.ganesh.optimisedlocationapplication
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Location
@@ -223,6 +224,7 @@ class OptimisedLocationManager(
     /**
      * Fallback to network-assisted location
      */
+    @SuppressLint("MissingPermission")
     private suspend fun tryNetworkLocation(): OptimisedLocationData? = withContext(Dispatchers.IO) {
         return@withContext try {
             withTimeout(config.networkTimeoutMs) {
@@ -276,6 +278,7 @@ class OptimisedLocationManager(
     /**
      * Try fused location as last resort
      */
+    @SuppressLint("MissingPermission")
     private suspend fun tryFusedLocation(): OptimisedLocationData? = withContext(Dispatchers.IO) {
         return@withContext try {
             suspendCancellableCoroutine<OptimisedLocationData?> { continuation ->
@@ -388,10 +391,17 @@ class OptimisedLocationManager(
                         reason = context.getString(R.string.error_distance_exceeds, distance, config.maxDistanceKm)
                     )
                 }
+            } else {
+                // Last known location is > 10 minutes old, skip distance check
+                println("Skipping distance check as last known location is older than 10 minutes")
+                return ValidationResult(
+                    isValid = false,
+                    reason = context.getString(R.string.error_last_location_data_old, lastKnownAge)
+                )
             }
-            // If last known location is > 10 minutes old, skip distance comparison
         }
 
+        //all validation criteria met
         return ValidationResult(
             isValid = true,
             reason = OptimisedLocationUtils.getString(context, R.string.validation_all_criteria_met)
