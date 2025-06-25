@@ -81,6 +81,7 @@ class MainActivity : AppCompatActivity() {
     private var isLocationRequestInProgress = false
     private var pendingLocationCallback: ((OptimisedLocationDataResult) -> Unit)? = null
     private var buttonGetLocation: Button? = null
+    private var loadingDialog: AlertDialog? = null
 
     companion object {
         private const val REQUEST_CODE_ENABLE_GPS = 1001
@@ -280,6 +281,7 @@ class MainActivity : AppCompatActivity() {
      * Proceed with actual location acquisition
      */
     private fun proceedWithLocationAcquisition() {
+        showLoadingDialog()
         lifecycleScope.launch {
             try {
                 val result = optimisedLocationManager.acquireLocation()
@@ -288,8 +290,23 @@ class MainActivity : AppCompatActivity() {
                 handleLocationError(e)
             } finally {
                 isLocationRequestInProgress = false
+                dismissLoadingDialog()
             }
         }
+    }
+
+    private fun showLoadingDialog() {
+        if (loadingDialog?.isShowing == true) return
+        loadingDialog = AlertDialog.Builder(this)
+            .setView(R.layout.dialog_loading)
+            .setCancelable(false)
+            .create()
+        loadingDialog?.show()
+    }
+
+    private fun dismissLoadingDialog() {
+        loadingDialog?.dismiss()
+        loadingDialog = null
     }
 
     /**
@@ -560,5 +577,6 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         pendingLocationCallback = null
         isLocationRequestInProgress = false
+        dismissLoadingDialog()
     }
 }
