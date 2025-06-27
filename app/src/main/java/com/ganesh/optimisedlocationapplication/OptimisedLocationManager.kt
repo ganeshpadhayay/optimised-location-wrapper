@@ -25,8 +25,9 @@ import com.google.android.gms.location.Priority
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -38,13 +39,13 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Concurrent Location Manager with parallel execution
+ * Concurrent Location Manager with cascading timeout execution
  *
  * Key Features:
- * 1. Parallel Execution: Runs GPS, Network, and Fused location simultaneously
- * 2. Priority-based Selection: GPS > Network > Fused
- * 3. Optimized Timeouts: 30s for GPS, 15s for Network, no timeout for Fused
- * 4. Early Termination: Stops other requests when GPS succeeds
+ * 1. Cascading Timeouts: GPS (30s) > Network (15s) > Fused (fallback)
+ * 2. Early Termination: GPS success cancels all others immediately
+ * 3. Priority-based Fallback: GPS > Network > Fused
+ * 4. Maximum 30s total execution time
  */
 class OptimisedLocationManager(
     private val context: Context,
@@ -81,8 +82,8 @@ class OptimisedLocationManager(
                     userAction = OptimisedLocationUtils.USER_ACTION_ENABLE_GPS
                 )
             }
-            // Run all three location methods concurrently
-            val bestLocation = tryAllLocationMethodsConcurrently()
+            // Run all location methods with cascading timeouts
+            val bestLocation = tryAllLocationMethodsWithCascadingTimeouts()
 
             if (bestLocation != null) {
                 println("Best location acquired: ${bestLocation.source} - ${bestLocation}")
@@ -98,37 +99,84 @@ class OptimisedLocationManager(
     }
 
     /**
-     * Run all location methods concurrently with GPS status monitoring
+     * Run all location methods with cascading timeouts and priority-based selection
+     * 1. GPS gets full timeout (30s) - if succeeds, cancels others
+     * 2. Network gets 15s - if GPS fails and Network succeeds, return Network
+     * 3. Fused is fallback - return if both GPS and Network fail
+     * 4. Maximum execution time is GPS timeout (30s)
      */
-    private suspend fun tryAllLocationMethodsConcurrently(): OptimisedLocationData? = coroutineScope {
-        println("Starting concurrent location requests...")
+    private suspend fun tryAllLocationMethodsWithCascadingTimeouts(): OptimisedLocationData? = coroutineScope {
+        println("Starting cascading timeout location requests...")
+
         // Start all three location requests concurrently
-        val gpsDeferred = async { tryGPSLocationConcurrent() }
-        val networkDeferred = async { tryNetworkLocationConcurrent() }
-        val fusedDeferred = async { tryFusedLocationConcurrent() }
+        val gpsJob = async { tryGPSLocationConcurrent() }
+        val networkJob = async { tryNetworkLocationConcurrent() }
+        val fusedJob = async { tryFusedLocationConcurrent() }
 
         try {
-            // Wait for all to complete (or timeout)
-            val results = awaitAll(gpsDeferred, networkDeferred, fusedDeferred)
-            // Filter out null results
-            val validLocations = results.filterNotNull()
+            // Overall timeout is GPS timeout (30s max)
+            withTimeout(config.gpsTimeoutMs) {
+                // Wait for GPS to complete first (it has the longest timeout)
+                val gpsResult = try {
+                    gpsJob.await()
+                } catch (e: Exception) {
+                    println("GPS request failed: ${e.message}")
+                    null
+                }
 
-            if (validLocations.isEmpty()) {
-                println("No valid locations from any source")
-                return@coroutineScope null
+                // If GPS succeeded, cancel others and return GPS result
+                if (gpsResult != null) {
+                    println("GPS location acquired - cancelling other requests")
+                    networkJob.cancel()
+                    fusedJob.cancel()
+                    return@withTimeout gpsResult
+                }
+
+                // GPS failed, check Network result
+                val networkResult = try {
+                    networkJob.await()
+                } catch (e: Exception) {
+                    println("Network request failed: ${e.message}")
+                    null
+                }
+
+                // If Network succeeded, cancel Fused and return Network result
+                if (networkResult != null) {
+                    println("Network location acquired (GPS failed) - cancelling Fused")
+                    fusedJob.cancel()
+                    return@withTimeout networkResult
+                }
+
+                // Both GPS and Network failed, get Fused result as fallback
+                val fusedResult = try {
+                    fusedJob.await()
+                } catch (e: Exception) {
+                    println("Fused request failed: ${e.message}")
+                    null
+                }
+
+                if (fusedResult != null) {
+                    println("Fused location acquired (GPS and Network failed)")
+                } else {
+                    println("All location methods failed")
+                }
+
+                return@withTimeout fusedResult
             }
-            // Return best location based on priority: GPS > Network > Fused
-            val bestLocation = selectBestLocation(validLocations)
-            println("Selected best location: ${bestLocation.source}")
 
-            return@coroutineScope bestLocation
-
+        } catch (e: TimeoutCancellationException) {
+            println("Overall location acquisition timed out after ${config.gpsTimeoutMs}ms")
+            // Cancel all running jobs
+            gpsJob.cancel()
+            networkJob.cancel()
+            fusedJob.cancel()
+            return@coroutineScope null
         } catch (e: Exception) {
-            // Cancel all running coroutines if any error occurs
-            println("Error in concurrent location requests, cancelling all: ${e.message}")
-            gpsDeferred.cancel()
-            networkDeferred.cancel()
-            fusedDeferred.cancel()
+            println("Error in cascading location requests: ${e.message}")
+            // Cancel all running jobs
+            gpsJob.cancel()
+            networkJob.cancel()
+            fusedJob.cancel()
             throw e
         }
     }
@@ -138,8 +186,8 @@ class OptimisedLocationManager(
      */
     private suspend fun tryGPSLocationConcurrent(): OptimisedLocationData? = withContext(Dispatchers.IO) {
         return@withContext try {
-            println("Starting GPS location request (30s timeout)...")
-            withTimeout(30_000L) { // 30 seconds
+            println("Starting GPS location request (${config.gpsTimeoutMs}ms timeout)...")
+            withTimeout(config.gpsTimeoutMs) {
                 suspendCancellableCoroutine<OptimisedLocationData?> { continuation ->
                     val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
                     val isResumed = AtomicBoolean(false)
@@ -205,7 +253,7 @@ class OptimisedLocationManager(
             // Re-throw to be caught by the parent coroutine scope
             throw e
         } catch (e: TimeoutCancellationException) {
-            println("GPS timeout after 30 seconds")
+            println("GPS timeout after ${config.gpsTimeoutMs}ms")
             null
         } catch (e: Exception) {
             println("GPS error: ${e.message}")
@@ -214,13 +262,13 @@ class OptimisedLocationManager(
     }
 
     /**
-     * Network location with 15-second timeout
+     * Network location with configurable timeout
      */
     @SuppressLint("MissingPermission")
     private suspend fun tryNetworkLocationConcurrent(): OptimisedLocationData? = withContext(Dispatchers.IO) {
         return@withContext try {
-            println("Starting Network location request (15s timeout)...")
-            withTimeout(15_000L) { // 15 seconds
+            println("Starting Network location request (${config.networkTimeoutMs}ms timeout)...")
+            withTimeout(config.networkTimeoutMs) {
                 suspendCancellableCoroutine<OptimisedLocationData?> { continuation ->
                     val isResumed = AtomicBoolean(false)
                     val locationRequest = LocationRequest.Builder(Priority.PRIORITY_BALANCED_POWER_ACCURACY, 5000)
@@ -259,7 +307,7 @@ class OptimisedLocationManager(
                 }
             }
         } catch (e: TimeoutCancellationException) {
-            println("Network location timeout after 15 seconds")
+            println("Network location timeout after ${config.networkTimeoutMs}ms")
             null
         } catch (e: Exception) {
             println("Network location error: ${e.message}")
@@ -299,31 +347,6 @@ class OptimisedLocationManager(
             println("Fused location error: ${e.message}")
             null
         }
-    }
-
-    /**
-     * Select the best location based on priority and quality
-     */
-    private fun selectBestLocation(locations: List<OptimisedLocationData>): OptimisedLocationData {
-        // Priority order: GPS > Network > Fused
-        val gpsLocation = locations.find { it.source == LocationSource.GPS }
-        if (gpsLocation != null) {
-            println("Selecting GPS location (highest priority)")
-            return gpsLocation
-        }
-        val networkLocation = locations.find { it.source == LocationSource.NETWORK }
-        if (networkLocation != null) {
-            println("Selecting Network location (medium priority)")
-            return networkLocation
-        }
-        val fusedLocation = locations.find { it.source == LocationSource.FUSED }
-        if (fusedLocation != null) {
-            println("Selecting Fused location (lowest priority)")
-            return fusedLocation
-        }
-        // Fallback to the first available (shouldn't reach here)
-        println("Selecting first available location as fallback")
-        return locations.first()
     }
 
     /**
